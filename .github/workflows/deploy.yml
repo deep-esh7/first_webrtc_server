@@ -41,7 +41,8 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    environment: production
+    # Remove environment requirement if you don't have it configured
+    # environment: production
     
     steps:
     - name: Checkout code
@@ -60,12 +61,22 @@ jobs:
           
           echo "🚀 Starting deployment..."
           
-          # Navigate to project directory
+          # Navigate to project directory or create it
+          mkdir -p ${{ env.PROJECT_PATH }}
           cd ${{ env.PROJECT_PATH }}
+          
+          # Initialize git if not already done
+          if [ ! -d ".git" ]; then
+            echo "📁 Initializing git repository..."
+            git init
+            git remote add origin https://github.com/deep-esh7/first_webrtc_server.git
+          fi
           
           # Backup current version (optional)
           echo "💾 Creating backup..."
-          cp -r . ../webrtc-signaling-backup-$(date +%Y%m%d_%H%M%S) || true
+          if [ -f "server.js" ]; then
+            cp -r . ../webrtc-signaling-backup-$(date +%Y%m%d_%H%M%S) || true
+          fi
           
           # Pull latest changes
           echo "📥 Pulling latest changes..."
@@ -75,6 +86,9 @@ jobs:
           # Install/update dependencies
           echo "📦 Installing dependencies..."
           npm ci --production --silent
+          
+          # Create logs directory if it doesn't exist
+          mkdir -p logs
           
           # Safety check - list all PM2 processes before changes
           echo "📋 Current PM2 processes:"
@@ -97,7 +111,7 @@ jobs:
           
           # Wait a moment for the process to start
           echo "⏳ Waiting for process to initialize..."
-          sleep 5
+          sleep 10
           
           # Check if the process is running
           echo "🔍 Checking process status..."
@@ -126,14 +140,21 @@ jobs:
       run: |
         echo "🏥 Performing external health check..."
         
-        # Test health endpoint
-        response=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.HOST }}:3006/health)
-        if [ $response = "200" ]; then
-          echo "✅ Health check passed!"
-        else
-          echo "❌ Health check failed with HTTP status: $response"
-          exit 1
-        fi
+        # Test health endpoint with retries
+        for i in {1..3}; do
+          echo "Attempt $i/3..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.HOST }}:3006/health)
+          if [ $response = "200" ]; then
+            echo "✅ Health check passed!"
+            break
+          else
+            echo "❌ Health check failed with HTTP status: $response"
+            if [ $i -eq 3 ]; then
+              exit 1
+            fi
+            sleep 5
+          fi
+        done
         
         # Test rooms endpoint
         echo "🏠 Testing rooms endpoint..."
@@ -168,7 +189,8 @@ jobs:
         echo "Response time: ${response_time}s"
         
         # Check if response time is reasonable (under 2 seconds)
-        if (( $(echo "$response_time < 2.0" | bc -l) )); then
+        # Use awk instead of bc for better compatibility
+        if [ $(echo "$response_time < 2.0" | awk '{print ($1 < $3)}') -eq 1 ]; then
           echo "✅ Response time is good!"
         else
           echo "⚠️ Response time is slow: ${response_time}s"
@@ -255,25 +277,6 @@ jobs:
         
         echo ""
         echo "🕐 Deployment completed at: $(date)"
-        
-    - name: Slack Notification (Optional)
-      if: always()
-      run: |
-        # Uncomment and configure if you want Slack notifications
-        # You'll need to add SLACK_WEBHOOK_URL to your GitHub secrets
-        
-        echo "📢 Slack notification would go here"
-        
-        # Example Slack notification:
-        # if [ "${{ needs.deploy.result }}" == "success" ]; then
-        #   MESSAGE="✅ WebRTC Server deployed successfully to ${{ secrets.HOST }}:3006"
-        # else
-        #   MESSAGE="❌ WebRTC Server deployment failed"
-        # fi
-        # 
-        # curl -X POST -H 'Content-type: application/json' \
-        #   --data "{\"text\":\"$MESSAGE\"}" \
-        #   ${{ secrets.SLACK_WEBHOOK_URL }}
 
   cleanup:
     needs: notify
