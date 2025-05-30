@@ -316,7 +316,8 @@ app.get('/metrics', (req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
+// Changed default port to 3006
+const PORT = process.env.PORT || 3006;
 
 server.listen(PORT, () => {
   console.log(`Signaling server running on port ${PORT}`);

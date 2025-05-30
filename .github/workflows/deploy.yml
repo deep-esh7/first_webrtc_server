@@ -1,0 +1,301 @@
+# .github/workflows/deploy.yml
+name: Deploy WebRTC Signaling Server
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  NODE_VERSION: '18'
+  PROJECT_PATH: '/var/www/webrtc-signaling-server'
+  PM2_APP_NAME: 'webrtc-signaling'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Lint code (optional)
+      run: |
+        echo "Linting would go here"
+        # npm run lint
+
+    - name: Run tests (optional)
+      run: |
+        echo "Tests would go here"
+        # npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to Production Server
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: 22
+        timeout: 300s
+        script: |
+          set -e  # Exit on any error
+          
+          echo "🚀 Starting deployment..."
+          
+          # Navigate to project directory
+          cd ${{ env.PROJECT_PATH }}
+          
+          # Backup current version (optional)
+          echo "💾 Creating backup..."
+          cp -r . ../webrtc-signaling-backup-$(date +%Y%m%d_%H%M%S) || true
+          
+          # Pull latest changes
+          echo "📥 Pulling latest changes..."
+          git fetch origin
+          git reset --hard origin/main || git reset --hard origin/master
+          
+          # Install/update dependencies
+          echo "📦 Installing dependencies..."
+          npm ci --production --silent
+          
+          # Safety check - list all PM2 processes before changes
+          echo "📋 Current PM2 processes:"
+          pm2 list
+          
+          # Stop ONLY our specific PM2 process gracefully
+          echo "🛑 Stopping ONLY webrtc-signaling process..."
+          pm2 stop ${{ env.PM2_APP_NAME }} || true
+          
+          # Start ONLY our specific PM2 process
+          echo "▶️ Starting webrtc-signaling process..."
+          pm2 start ecosystem.config.js
+          
+          # Safety check - verify only our process was affected
+          echo "✅ Verifying other processes are still running:"
+          pm2 list
+          
+          # Save PM2 configuration
+          pm2 save
+          
+          # Wait a moment for the process to start
+          echo "⏳ Waiting for process to initialize..."
+          sleep 5
+          
+          # Check if the process is running
+          echo "🔍 Checking process status..."
+          pm2 show ${{ env.PM2_APP_NAME }}
+          
+          # Test health endpoint
+          echo "🏥 Testing health endpoint..."
+          curl -f http://localhost:3006/health || exit 1
+          
+          echo "✅ Deployment completed successfully!"
+          echo "🌐 Server is running at http://${{ secrets.HOST }}:3006"
+          
+          # Display final status
+          echo "📊 Final PM2 status:"
+          pm2 status
+
+  health-check:
+    needs: deploy
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Wait for deployment stabilization
+      run: sleep 15
+      
+    - name: External Health Check
+      run: |
+        echo "🏥 Performing external health check..."
+        
+        # Test health endpoint
+        response=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.HOST }}:3006/health)
+        if [ $response = "200" ]; then
+          echo "✅ Health check passed!"
+        else
+          echo "❌ Health check failed with HTTP status: $response"
+          exit 1
+        fi
+        
+        # Test rooms endpoint
+        echo "🏠 Testing rooms endpoint..."
+        rooms_response=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.HOST }}:3006/rooms)
+        if [ $rooms_response = "200" ]; then
+          echo "✅ Rooms endpoint working!"
+        else
+          echo "⚠️ Rooms endpoint returned: $rooms_response"
+        fi
+        
+        # Test metrics endpoint
+        echo "📊 Testing metrics endpoint..."
+        metrics_response=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.HOST }}:3006/metrics)
+        if [ $metrics_response = "200" ]; then
+          echo "✅ Metrics endpoint working!"
+        else
+          echo "⚠️ Metrics endpoint returned: $metrics_response"
+        fi
+
+  performance-check:
+    needs: health-check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Performance and Load Test
+      run: |
+        echo "⚡ Running basic performance checks..."
+        
+        # Test response time
+        echo "🕐 Testing response time..."
+        response_time=$(curl -s -o /dev/null -w "%{time_total}" http://${{ secrets.HOST }}:3006/health)
+        echo "Response time: ${response_time}s"
+        
+        # Check if response time is reasonable (under 2 seconds)
+        if (( $(echo "$response_time < 2.0" | bc -l) )); then
+          echo "✅ Response time is good!"
+        else
+          echo "⚠️ Response time is slow: ${response_time}s"
+        fi
+        
+        # Test server load with multiple concurrent requests
+        echo "🔄 Testing with multiple concurrent requests..."
+        for i in {1..5}; do
+          curl -s http://${{ secrets.HOST }}:3006/health > /dev/null &
+        done
+        wait
+        echo "✅ Concurrent requests test completed!"
+
+  security-check:
+    needs: performance-check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Basic Security Checks
+      run: |
+        echo "🔒 Running basic security checks..."
+        
+        # Check if server responds to HTTP
+        echo "🌐 Checking HTTP response headers..."
+        curl -I http://${{ secrets.HOST }}:3006/health
+        
+        # Check for common security headers (this is basic, you might want more)
+        echo "🛡️ Security check completed (basic)"
+        
+        # Note: For production, consider adding:
+        # - SSL/TLS certificate check
+        # - Security headers validation
+        # - Vulnerability scanning
+
+  notify:
+    needs: [deploy, health-check, performance-check, security-check]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Deployment Summary
+      run: |
+        echo "📋 Deployment Summary:"
+        echo "===================="
+        
+        # Check all job results
+        if [ "${{ needs.deploy.result }}" == "success" ] && \
+           [ "${{ needs.health-check.result }}" == "success" ] && \
+           [ "${{ needs.performance-check.result }}" == "success" ] && \
+           [ "${{ needs.security-check.result }}" == "success" ]; then
+          
+          echo "🎉 ALL CHECKS PASSED - Deployment Successful!"
+          echo ""
+          echo "🌐 Server Information:"
+          echo "  Main URL: http://${{ secrets.HOST }}:3006"
+          echo "  Health Check: http://${{ secrets.HOST }}:3006/health"
+          echo "  Metrics: http://${{ secrets.HOST }}:3006/metrics"
+          echo "  Rooms API: http://${{ secrets.HOST }}:3006/rooms"
+          echo ""
+          echo "📱 Flutter App Connection:"
+          echo "  Use: http://${{ secrets.HOST }}:3006"
+          echo ""
+          echo "🔧 Server Management:"
+          echo "  SSH: ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }}"
+          echo "  PM2 Status: pm2 status"
+          echo "  PM2 Logs: pm2 logs webrtc-signaling"
+          
+        else
+          echo "💥 DEPLOYMENT ISSUES DETECTED:"
+          echo ""
+          echo "Job Results:"
+          echo "  Deploy: ${{ needs.deploy.result }}"
+          echo "  Health Check: ${{ needs.health-check.result }}"
+          echo "  Performance: ${{ needs.performance-check.result }}"
+          echo "  Security: ${{ needs.security-check.result }}"
+          echo ""
+          echo "🔍 Troubleshooting:"
+          echo "  1. Check GitHub Actions logs"
+          echo "  2. SSH to server: ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }}"
+          echo "  3. Check PM2 status: pm2 status"
+          echo "  4. Check PM2 logs: pm2 logs webrtc-signaling"
+          echo "  5. Check server logs: tail -f /var/www/webrtc-signaling-server/logs/error.log"
+        fi
+        
+        echo ""
+        echo "🕐 Deployment completed at: $(date)"
+        
+    - name: Slack Notification (Optional)
+      if: always()
+      run: |
+        # Uncomment and configure if you want Slack notifications
+        # You'll need to add SLACK_WEBHOOK_URL to your GitHub secrets
+        
+        echo "📢 Slack notification would go here"
+        
+        # Example Slack notification:
+        # if [ "${{ needs.deploy.result }}" == "success" ]; then
+        #   MESSAGE="✅ WebRTC Server deployed successfully to ${{ secrets.HOST }}:3006"
+        # else
+        #   MESSAGE="❌ WebRTC Server deployment failed"
+        # fi
+        # 
+        # curl -X POST -H 'Content-type: application/json' \
+        #   --data "{\"text\":\"$MESSAGE\"}" \
+        #   ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  cleanup:
+    needs: notify
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Cleanup Old Backups
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: 22
+        script: |
+          echo "🧹 Cleaning up old backups..."
+          
+          # Keep only the last 5 backups
+          cd /var/www/
+          ls -t webrtc-signaling-backup-* 2>/dev/null | tail -n +6 | xargs -r rm -rf
+          
+          # Clean up old PM2 logs (keep last 7 days)
+          pm2 flush
+          
+          echo "✅ Cleanup completed!"

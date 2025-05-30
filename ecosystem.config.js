@@ -7,10 +7,16 @@ module.exports = {
     instances: 'max', // Use all CPU cores
     exec_mode: 'cluster',
     
-    // Environment variables
+    // Environment variables - Set PORT to 3006
     env: {
       NODE_ENV: 'production',
-      PORT: 3000
+      PORT: 3006  // Changed to port 3006
+    },
+    
+    // Development environment (optional)
+    env_development: {
+      NODE_ENV: 'development',
+      PORT: 3006
     },
     
     // Logging
